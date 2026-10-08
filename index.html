@@ -557,9 +557,11 @@ function colorFor(g){if(!GCOLOR[g]){GCOLOR[g]=extraColors[gColorSeq++%extraColor
 // client-side caches (โหลดจาก ฐานข้อมูล ผ่าน Apps Script)
 let students=[], bookings=[], sentEmails=[], errorLogs=[];
 
+const BKK_TZ='Asia/Bangkok';
+function bkkKey(d){return new Date(d).toLocaleDateString('en-CA',{timeZone:BKK_TZ});} // YYYY-MM-DD ตามเวลาไทย
 const today=new Date();
-const todayKey=today.toISOString().slice(0,10);
-function dkey(offset){const d=new Date();d.setDate(d.getDate()+offset);return d.toISOString().slice(0,10);}
+const todayKey=bkkKey(today);
+function dkey(offset){const d=new Date(todayKey+'T12:00:00+07:00');d.setDate(d.getDate()+offset);return bkkKey(d);}
 
 let CURRENT=null;
 /* ห้องที่ใช้พื้นที่/เครื่องร่วมกัน — จองเวลาทับกันข้ามเครื่องไม่ได้ (X-ray 1 กับ Mammogram อยู่ห้องเดียวกัน) */
@@ -576,7 +578,7 @@ window.__RTCRA_MODE='server';
 /* เรียกหลังบ้านผ่าน Supabase (PostgREST RPC) — ข้อมูลอยู่ใน Postgres ของ Supabase */
 const CFG=(window.RTCRA_CONFIG)||{};
 const SB=(window.supabase&&CFG.SUPABASE_URL)?window.supabase.createClient(CFG.SUPABASE_URL,CFG.SUPABASE_ANON_KEY):null;
-const _RPC={login:'rtcra_login',adminLogin:'rtcra_admin_login',register:'rtcra_register',getData:'rtcra_get_data',createBooking:'rtcra_create_booking',cancelBooking:'rtcra_cancel_booking',approve:'rtcra_approve',reject:'rtcra_reject'};
+const _RPC={login:'rtcra_login',adminLogin:'rtcra_admin_login',register:'rtcra_register',getData:'rtcra_get_data',createBooking:'rtcra_create_booking',cancelBooking:'rtcra_cancel_booking',approve:'rtcra_approve',reject:'rtcra_reject',resetGroupHours:'rtcra_reset_group_hours'};
 function _params(fn,a){
   switch(fn){
     case 'login':return {p_code:a[0],p_phone:a[1]};
@@ -587,6 +589,7 @@ function _params(fn,a){
     case 'cancelBooking':return {p_id:a[0],p_code:a[1]};
     case 'approve':return {p_code:a[0],p_admin:a[1]};
     case 'reject':return {p_code:a[0],p_admin:a[1]};
+    case 'resetGroupHours':return {p_admin:a[0]};
   }
   return {};
 }
@@ -605,6 +608,7 @@ async function callServer(fn){
 async function loadData(){
   const d=await callServer('getData',CURRENT.code);
   bookings=d.bookings||[];students=d.students||[];errorLogs=d.errorLogs||[];sentEmails=d.emailLog||[];
+  window.__statsResetAt=(d&&d.statsResetAt)||'';
 }
 
 /* ============ UTIL ============ */
@@ -1041,7 +1045,9 @@ function renderTT(date){
 function viewStats(){
   const roomHours={};ROOMS.forEach(r=>roomHours[r.id]=0);
   const grpHours={};
-  bookings.filter(b=>b.status==='active').forEach(b=>{const h=(toMin(b.end)-toMin(b.start))/60;roomHours[b.room]+=h;grpHours[b.grp]=(grpHours[b.grp]||0)+h;});
+  const _rst=window.__statsResetAt||'';
+  const _inc=b=>b.status==='active'&&(!_rst||String(b.created_at||'')>=_rst);
+  bookings.filter(_inc).forEach(b=>{const h=(toMin(b.end)-toMin(b.start))/60;roomHours[b.room]+=h;grpHours[b.grp]=(grpHours[b.grp]||0)+h;});
   const grpList=Object.keys(grpHours).sort();
   const maxG=Math.max(...Object.values(grpHours),1);
   const totalRoom=Object.values(roomHours).reduce((a,b)=>a+b,0)||1;
@@ -1065,7 +1071,7 @@ function viewStats(){
 
     <div class="grid g-2">
       <div class="card">
-        <div class="card-head"><h3>ชั่วโมงการใช้งานแยกตามกลุ่ม</h3></div>
+        <div class="card-head"><h3>ชั่วโมงการใช้งานแยกตามกลุ่ม</h3><div style="display:flex;align-items:center;gap:10px">${_rst?`<span class="tag">นับตั้งแต่ ${esc(_rst)}</span>`:''}${CURRENT.role==='admin'?`<button class="btn btn-danger btn-sm" onclick="resetGroupHours()">↻ รีเซ็ตชั่วโมง</button>`:''}</div></div>
         <div class="card-pad">
           ${grpList.map(g=>`<div class="bar-row"><div class="bar-lbl">${esc(g)}</div><div class="bar-track"><div class="bar-fill ${colorFor(g)}" data-w="${Math.round(grpHours[g]/maxG*100)}" style="width:0">${grpHours[g].toFixed(0)} ชม.</div></div></div>`).join('')}
         </div>
@@ -1085,6 +1091,12 @@ function viewStats(){
       </div>
     </div>
   </div>`;
+}
+async function resetGroupHours(){
+  if(!confirm('ยืนยันรีเซ็ตชั่วโมงการใช้งานแยกตามกลุ่ม?\nระบบจะเริ่มนับชั่วโมงใหม่จากตอนนี้ (การจองเดิมยังอยู่ครบ ไม่ถูกลบ)'))return;
+  const res=await callServer('resetGroupHours',CURRENT.code);
+  if(res&&res.ok){window.__statsResetAt=res.at||'';await loadData();go('stats');setTimeout(animBars,60);toast('รีเซ็ตชั่วโมงการใช้งานแล้ว — เริ่มนับรอบใหม่','ok');}
+  else toast((res&&res.error)||'รีเซ็ตไม่สำเร็จ','bad');
 }
 function animBars(){document.querySelectorAll('.bar-fill').forEach(b=>{b.style.width=b.dataset.w+'%';});}
 
@@ -1171,7 +1183,7 @@ async function reject(code){const res=await callServer('reject',code,CURRENT.cod
 /* ============ LIVE CLOCK ============ */
 setInterval(()=>{
   const el=$('#liveClock');
-  if(el){const n=new Date();const p=x=>x.toString().padStart(2,'0');el.innerHTML=`${p(n.getHours())}:${p(n.getMinutes())}<small>:${p(n.getSeconds())}</small>`;}
+  if(el){const t=new Date().toLocaleTimeString('en-GB',{timeZone:BKK_TZ,hour12:false}).split(':');el.innerHTML=`${t[0]}:${t[1]}<small>:${t[2]}</small>`;}
 },1000);
 
 if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('sw.js').catch(function(){});});}
